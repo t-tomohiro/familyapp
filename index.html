@@ -1,61 +1,70 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Plus, 
   Trash2, 
   ShoppingCart, 
   CheckCircle2, 
-  Loader2,
-  MessageSquare,
-  PackageSearch,
-  Send,
-  Check,
-  AlertTriangle,
-  CalendarDays,
-  Clock,
-  Calendar as CalendarIcon,
-  Squirrel
+  Loader2, 
+  MessageSquare, 
+  PackageSearch, 
+  Send, 
+  Check, 
+  AlertTriangle, 
+  Calendar, 
+  Clock, 
+  Squirrel,
+  X
 } from 'lucide-react';
 
 // Firebase imports
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, onSnapshot, doc, addDoc, updateDoc, deleteDoc, writeBatch, query, orderBy } from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  onAuthStateChanged, 
+  signInWithCustomToken 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  onSnapshot, 
+  doc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc 
+} from 'firebase/firestore';
 
-/**
- * 環境変数からFirebase設定を取得。
- * Netlifyなどにデプロイする際は、自身のFirebase設定に書き換えてください。
- */
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-  apiKey: "", 
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
-};
-
+// ==========================================
+// 🛠 Firebase Configuration & Setup
+// ==========================================
+const firebaseConfig = JSON.parse(__firebase_config);
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// App ID sanitization for path safety
+const rawAppId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const appId = rawAppId.replace(/\//g, '_');
 
 export default function App() {
   const [user, setUser] = useState(null);
-  const [activeTab, setActiveTab] = useState('stock'); // 'stock' | 'schedule' | 'memo'
+  const [activeTab, setActiveTab] = useState('stock'); 
   const [items, setItems] = useState([]);
   const [memos, setMemos] = useState([]);
   const [schedules, setSchedules] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // 入力フォームの状態
+  // Form States
   const [newStock, setNewStock] = useState('');
   const [newMemo, setNewMemo] = useState('');
   const [newSched, setNewSched] = useState({ title: '', date: '', start: '', end: '' });
+  
+  // Modal State
+  const [deleteTarget, setDeleteTarget] = useState(null);
 
-  // 削除確認モーダル
-  const [deleteTarget, setDeleteTarget] = useState(null); // { id, type, collection }
-
-  // 1. 認証 (Rule 3)
+  // ==========================================
+  // 🔐 Authentication (Rule 3 Compliance)
+  // ==========================================
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -65,95 +74,160 @@ export default function App() {
           await signInAnonymously(auth);
         }
       } catch (err) {
-        console.error("Auth error:", err);
+        console.error("Auth Error:", err);
       }
     };
     initAuth();
-    const unsubscribe = onAuthStateChanged(auth, setUser);
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
     return () => unsubscribe();
   }, []);
 
-  // 2. データのリアルタイム同期 (Rule 1 & 2)
+  // ==========================================
+  // 📡 Real-time Data Sync (Rule 1 & 2 Compliance)
+  // ==========================================
   useEffect(() => {
     if (!user) return;
 
-    // ストック
-    const qStock = collection(db, 'artifacts', appId, 'public', 'data', 'stock_items');
-    const unsubStock = onSnapshot(qStock, (snapshot) => {
-      setItems(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    // 1. Stock Items
+    const stockCollection = collection(db, 'artifacts', appId, 'public', 'data', 'stock_items');
+    const unsubStock = onSnapshot(stockCollection, (snapshot) => {
+      const data = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      // Sort: Check items go to bottom, uncheck (needed) items go to top
+      setItems(data.sort((a, b) => (Number(b.isNeeded || 0) - Number(a.isNeeded || 0))));
       setIsLoading(false);
-    }, (err) => console.error("Stock error:", err));
+    }, (error) => console.error("Stock sync error:", error));
 
-    // メモ
-    const qMemo = collection(db, 'artifacts', appId, 'public', 'data', 'shared_memos');
-    const unsubMemo = onSnapshot(qMemo, (snapshot) => {
+    // 2. Memos
+    const memoCollection = collection(db, 'artifacts', appId, 'public', 'data', 'shared_memos');
+    const unsubMemo = onSnapshot(memoCollection, (snapshot) => {
       const data = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      // Sort by CreatedAt Descending (Newest first)
       setMemos(data.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
-    });
+    }, (error) => console.error("Memo sync error:", error));
 
-    // 予定
-    const qSched = collection(db, 'artifacts', appId, 'public', 'data', 'shared_schedules');
-    const unsubSched = onSnapshot(qSched, (snapshot) => {
+    // 3. Schedules
+    const scheduleCollection = collection(db, 'artifacts', appId, 'public', 'data', 'shared_schedules');
+    const unsubSched = onSnapshot(scheduleCollection, (snapshot) => {
       const data = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-      setSchedules(data.sort((a, b) => a.date.localeCompare(b.date)));
-    });
+      // Sort by Date Ascending, then Start Time
+      setSchedules(data.sort((a, b) => {
+        const dateDiff = (a.date || '').localeCompare(b.date || '');
+        if (dateDiff !== 0) return dateDiff;
+        return (a.start || '').localeCompare(b.start || '');
+      }));
+    }, (error) => console.error("Schedule sync error:", error));
 
-    return () => {
-      unsubStock();
-      unsubMemo();
-      unsubSched();
-    };
+    return () => { unsubStock(); unsubMemo(); unsubSched(); };
   }, [user]);
 
-  // 操作系
+  // ==========================================
+  // 🎮 Handlers
+  // ==========================================
+
+  // --- Stock Handlers ---
   const handleAddStock = async (e) => {
     e.preventDefault();
-    if (!newStock.trim()) return;
-    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'stock_items'), {
-      name: newStock.trim(), isNeeded: false, createdAt: Date.now()
-    });
-    setNewStock('');
+    if (!newStock.trim() || !user) return;
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'stock_items'), {
+        name: newStock.trim(),
+        isNeeded: true, // Default to needed when adding
+        createdAt: Date.now()
+      });
+      setNewStock('');
+    } catch (err) {
+      console.error("Add stock error:", err);
+    }
   };
 
-  const handleAddMemo = async (e) => {
-    e.preventDefault();
-    if (!newMemo.trim()) return;
-    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'shared_memos'), {
-      text: newMemo.trim(), isRead: false, authorId: user.uid, createdAt: Date.now()
-    });
-    setNewMemo('');
+  const handleToggleStock = async (item) => {
+    if (!user) return;
+    try {
+      const itemRef = doc(db, 'artifacts', appId, 'public', 'data', 'stock_items', item.id);
+      await updateDoc(itemRef, { isNeeded: !item.isNeeded });
+    } catch (err) {
+      console.error("Update stock error:", err);
+    }
   };
 
+  // --- Schedule Handlers ---
   const handleAddSched = async (e) => {
     e.preventDefault();
-    if (!newSched.title || !newSched.date) return;
-    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'shared_schedules'), {
-      ...newSched, createdAt: Date.now()
-    });
-    setNewSched({ title: '', date: '', start: '', end: '' });
+    if (!newSched.title || !newSched.date || !user) return;
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'shared_schedules'), {
+        ...newSched,
+        createdAt: Date.now()
+      });
+      setNewSched({ title: '', date: '', start: '', end: '' });
+    } catch (err) {
+      console.error("Add schedule error:", err);
+    }
   };
 
+  // --- Memo Handlers ---
+  const handleAddMemo = async (e) => {
+    e.preventDefault();
+    if (!newMemo.trim() || !user) return;
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'shared_memos'), {
+        text: newMemo.trim(),
+        isRead: false,
+        authorId: user.uid,
+        createdAt: Date.now()
+      });
+      setNewMemo('');
+    } catch (err) {
+      console.error("Add memo error:", err);
+    }
+  };
+
+  const handleMarkMemoAsRead = async (id) => {
+    if (!user) return;
+    try {
+      const memoRef = doc(db, 'artifacts', appId, 'public', 'data', 'shared_memos', id);
+      await updateDoc(memoRef, { isRead: true });
+    } catch (err) {
+      console.error("Update memo error:", err);
+    }
+  };
+
+  // --- Common Delete Handler ---
   const executeDelete = async () => {
-    if (!deleteTarget) return;
-    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', deleteTarget.collection, deleteTarget.id));
-    setDeleteTarget(null);
+    if (!deleteTarget || !user) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', deleteTarget.collection, deleteTarget.id));
+      setDeleteTarget(null);
+    } catch (err) {
+      console.error("Delete error:", err);
+    }
   };
 
   const unreadCount = useMemo(() => memos.filter(m => !m.isRead).length, [memos]);
 
+  // ==========================================
+  // 🎨 Render
+  // ==========================================
+
   if (isLoading && !user) return (
     <div className="h-screen flex items-center justify-center bg-orange-50">
-      <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
+      <div className="text-center">
+        <Loader2 className="w-10 h-10 text-orange-500 animate-spin mx-auto mb-2" />
+        <p className="text-orange-400 font-bold text-sm">読み込み中...</p>
+      </div>
     </div>
   );
 
   return (
-    <div className="max-w-md mx-auto min-h-screen bg-orange-50 font-sans text-gray-800 pb-24 relative">
+    <div className="max-w-md mx-auto min-h-screen bg-orange-50 font-sans text-gray-800 pb-28 relative shadow-xl overflow-hidden">
+      
       {/* Header */}
-      <header className="bg-white p-4 shadow-sm sticky top-0 z-20">
-        <h1 className="text-xl font-bold text-orange-600 flex items-center gap-2">
-          <div className="bg-orange-100 p-2 rounded-full shadow-sm">
-            <Squirrel className="w-6 h-6 text-orange-500" />
+      <header className="bg-white/80 backdrop-blur-md p-4 shadow-sm sticky top-0 z-20 border-b border-orange-100">
+        <h1 className="text-xl font-bold text-orange-600 flex items-center justify-center gap-2">
+          <div className="bg-orange-100 p-2 rounded-full">
+            <Squirrel className="w-5 h-5 text-orange-500" />
           </div>
           ファミリーアプリ
         </h1>
@@ -162,170 +236,274 @@ export default function App() {
       <main className="p-4">
         {/* === STOCK TAB === */}
         {activeTab === 'stock' && (
-          <div className="animate-in fade-in duration-300">
+          <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
             <form onSubmit={handleAddStock} className="flex gap-2 mb-6">
               <input 
-                value={newStock} onChange={e => setNewStock(e.target.value)}
-                placeholder="在庫を追加..." 
-                className="flex-1 px-4 py-3 rounded-2xl border-none shadow-sm focus:ring-2 focus:ring-orange-400 outline-none text-sm"
+                value={newStock} 
+                onChange={e => setNewStock(e.target.value)} 
+                placeholder="買うものを追加 (例: 牛乳)" 
+                className="flex-1 px-4 py-3 rounded-2xl border border-orange-100 shadow-sm outline-none focus:ring-2 focus:ring-orange-200 text-sm transition-all" 
               />
-              <button className="bg-orange-500 text-white p-3 rounded-2xl shadow-md"><Plus /></button>
+              <button 
+                type="submit" 
+                disabled={!newStock.trim()}
+                className="bg-orange-500 disabled:bg-orange-300 text-white p-3 rounded-2xl shadow-md transition-transform active:scale-95"
+              >
+                <Plus />
+              </button>
             </form>
-            <div className="grid grid-cols-3 gap-3">
+            
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {items.map(item => (
                 <div 
                   key={item.id} 
-                  onClick={() => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'stock_items', item.id), { isNeeded: !item.isNeeded })}
-                  className={`relative aspect-square rounded-2xl p-2 flex flex-col items-center justify-center border-2 transition-all shadow-sm ${item.isNeeded ? 'bg-orange-100 border-orange-400' : 'bg-white border-transparent'}`}
+                  onClick={() => handleToggleStock(item)}
+                  className={`relative aspect-square rounded-2xl p-3 flex flex-col items-center justify-center border-2 transition-all cursor-pointer shadow-sm active:scale-95 ${
+                    item.isNeeded 
+                      ? 'bg-white border-orange-400 shadow-orange-100' 
+                      : 'bg-gray-100 border-transparent opacity-60 grayscale'
+                  }`}
                 >
-                  {item.isNeeded ? <ShoppingCart className="text-orange-500 w-8 h-8 mb-1" /> : <CheckCircle2 className="text-green-300 w-8 h-8 mb-1" />}
-                  <span className="text-[10px] font-bold text-center leading-tight line-clamp-2">{item.name}</span>
+                  {item.isNeeded ? (
+                    <ShoppingCart className="text-orange-500 w-8 h-8 mb-2" />
+                  ) : (
+                    <CheckCircle2 className="text-green-500 w-8 h-8 mb-2" />
+                  )}
+                  <span className={`text-sm font-bold text-center leading-tight ${item.isNeeded ? 'text-gray-800' : 'text-gray-400 line-through'}`}>
+                    {item.name}
+                  </span>
+                  
                   <button 
-                    onClick={(e) => { e.stopPropagation(); setDeleteTarget({ id: item.id, collection: 'stock_items' }); }}
-                    className="absolute top-1 right-1 p-1 text-gray-300 hover:text-red-400"
+                    onClick={(e) => { 
+                      e.stopPropagation(); 
+                      setDeleteTarget({ id: item.id, collection: 'stock_items' }); 
+                    }} 
+                    className="absolute top-1 right-1 p-2 text-gray-300 hover:text-red-400 hover:bg-red-50 rounded-full transition-colors"
                   >
-                    <Trash2 className="w-3 h-3" />
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
               ))}
+              
+              {items.length === 0 && (
+                <div className="col-span-full py-10 text-center text-gray-400 text-sm">
+                  <PackageSearch className="w-10 h-10 mx-auto mb-2 opacity-20" />
+                  ストックはまだありません
+                </div>
+              )}
             </div>
           </div>
         )}
 
         {/* === SCHEDULE TAB === */}
         {activeTab === 'schedule' && (
-          <div className="animate-in fade-in duration-300">
-            <form onSubmit={handleAddSched} className="bg-white p-4 rounded-3xl shadow-sm mb-6 border border-white/50">
+          <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+            <form onSubmit={handleAddSched} className="bg-white p-5 rounded-3xl shadow-sm border border-orange-100 mb-6 flex flex-col gap-3">
               <input 
-                value={newSched.title} onChange={e => setNewSched({ ...newSched, title: e.target.value })}
+                value={newSched.title} 
+                onChange={e => setNewSched({ ...newSched, title: e.target.value })} 
                 placeholder="予定のタイトル" 
-                className="w-full p-3 rounded-xl bg-gray-50 border-none mb-4 focus:ring-2 focus:ring-orange-200 outline-none text-sm"
+                className="w-full p-3 rounded-xl bg-orange-50/50 border-none outline-none focus:ring-2 focus:ring-orange-200 text-sm font-medium placeholder:text-gray-400" 
               />
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                <div className="relative">
-                  <CalendarIcon className="absolute left-3 top-3.5 w-4 h-4 text-gray-400 pointer-events-none" />
-                  <input 
-                    type="date" value={newSched.date} onChange={e => setNewSched({ ...newSched, date: e.target.value })}
-                    required className="w-full pl-9 pr-3 py-3 rounded-xl bg-gray-50 border-none text-xs focus:ring-2 focus:ring-orange-200 outline-none h-12"
-                  />
-                </div>
-                <div className="flex items-center gap-1 bg-gray-50 rounded-xl px-2 h-12 border-none">
-                  <input 
-                    type="time" step="600" value={newSched.start} onChange={e => setNewSched({ ...newSched, start: e.target.value })}
-                    className="w-full text-center text-xs bg-transparent border-none p-0 focus:ring-0"
-                  />
-                  <span className="text-gray-300 text-xs">~</span>
-                  <input 
-                    type="time" step="600" value={newSched.end} onChange={e => setNewSched({ ...newSched, end: e.target.value })}
-                    className="w-full text-center text-xs bg-transparent border-none p-0 focus:ring-0"
+              <div className="grid grid-cols-5 gap-2">
+                <input 
+                  type="date" 
+                  value={newSched.date} 
+                  onChange={e => setNewSched({ ...newSched, date: e.target.value })} 
+                  className="col-span-3 p-3 rounded-xl bg-orange-50/50 border-none text-xs h-12 outline-none focus:ring-2 focus:ring-orange-200" 
+                />
+                <div className="col-span-2 flex items-center justify-center bg-orange-50/50 rounded-xl px-1 h-12">
+                   <input 
+                    type="time" 
+                    value={newSched.start} 
+                    onChange={e => setNewSched({ ...newSched, start: e.target.value })} 
+                    className="w-full text-center text-xs bg-transparent border-none focus:ring-0 p-0" 
                   />
                 </div>
               </div>
-              <button className="w-full bg-orange-500 text-white font-bold py-3 rounded-2xl shadow-lg flex items-center justify-center gap-2">
+              <button 
+                type="submit" 
+                disabled={!newSched.title || !newSched.date}
+                className="bg-orange-500 disabled:bg-orange-300 text-white font-bold py-3 rounded-2xl shadow-md mt-1 active:scale-95 transition-all"
+              >
                 予定を追加
               </button>
             </form>
+
             <div className="space-y-3">
-              {schedules.map(s => (
-                <div key={s.id} className="bg-white p-4 rounded-2xl border-l-8 border-orange-400 flex justify-between items-center shadow-sm">
-                  <div>
-                    <div className="flex gap-2 text-[10px] font-bold text-orange-600 mb-1">
-                      <span className="bg-orange-50 px-2 py-0.5 rounded">{s.date.replace(/-/g, '/')}</span>
-                      {s.start && <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{s.start}〜{s.end}</span>}
+              {schedules.map((s, index) => {
+                const isToday = s.date === new Date().toISOString().split('T')[0];
+                return (
+                  <div key={s.id} className={`bg-white p-4 rounded-2xl border-l-[6px] flex justify-between items-center shadow-sm ${isToday ? 'border-orange-500 ring-2 ring-orange-100' : 'border-gray-300'}`}>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${isToday ? 'bg-orange-100 text-orange-600' : 'bg-gray-100 text-gray-500'}`}>
+                          {s.date}
+                        </span>
+                        {s.start && (
+                          <span className="flex items-center gap-1 text-[10px] font-medium text-gray-500">
+                            <Clock className="w-3 h-3" />
+                            {s.start}
+                          </span>
+                        )}
+                      </div>
+                      <div className="font-bold text-gray-800">{s.title}</div>
                     </div>
-                    <div className="font-bold text-gray-800">{s.title}</div>
+                    <button 
+                      onClick={() => setDeleteTarget({ id: s.id, collection: 'shared_schedules' })}
+                      className="p-2 text-gray-300 hover:text-red-400 transition-colors"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
                   </div>
-                  <button onClick={() => setDeleteTarget({ id: s.id, collection: 'shared_schedules' })} className="p-2 text-gray-200 hover:text-red-400">
-                    <Trash2 className="w-5 h-5" />
-                  </button>
+                );
+              })}
+              {schedules.length === 0 && (
+                <div className="text-center py-10 text-gray-400 text-sm">
+                  <Calendar className="w-10 h-10 mx-auto mb-2 opacity-20" />
+                  予定はありません
                 </div>
-              ))}
+              )}
             </div>
           </div>
         )}
 
         {/* === MEMO TAB === */}
         {activeTab === 'memo' && (
-          <div className="animate-in fade-in duration-300 flex flex-col gap-4">
+          <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 flex flex-col gap-4">
             <form onSubmit={handleAddMemo} className="flex flex-col gap-2">
-              <textarea 
-                value={newMemo} onChange={e => setNewMemo(e.target.value)}
-                placeholder="家族へのメッセージ..." 
-                className="w-full p-4 rounded-3xl border-none shadow-sm h-28 text-sm focus:ring-2 focus:ring-orange-400 outline-none resize-none"
-              />
-              <button className="bg-orange-500 text-white font-bold py-4 rounded-2xl shadow-lg flex items-center justify-center gap-2">
-                <Send className="w-4 h-4" />送信する
-              </button>
+              <div className="relative">
+                <textarea 
+                  value={newMemo} 
+                  onChange={e => setNewMemo(e.target.value)} 
+                  placeholder="家族への伝言を入力..." 
+                  className="w-full p-4 rounded-3xl border border-orange-100 shadow-sm h-32 text-sm outline-none resize-none focus:ring-2 focus:ring-orange-200 transition-all" 
+                />
+                <button 
+                  type="submit" 
+                  disabled={!newMemo.trim()}
+                  className="absolute bottom-3 right-3 bg-orange-500 disabled:bg-gray-300 text-white p-2 rounded-xl shadow-md transition-all active:scale-95"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
             </form>
-            {memos.map(m => (
-              <div key={m.id} className={`p-5 rounded-3xl border shadow-sm transition-all ${m.isRead ? 'bg-gray-50 border-gray-100 opacity-70' : 'bg-yellow-50 border-yellow-200'}`}>
-                <p className="text-sm text-gray-800 mb-4 whitespace-pre-wrap leading-relaxed">{m.text}</p>
-                <div className="flex justify-between items-center">
-                  <span className="text-[10px] text-gray-400 font-medium">
-                    {new Date(m.createdAt).toLocaleString('ja-JP', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                  <div className="flex gap-2 items-center">
-                    {!m.isRead ? (
+
+            <div className="space-y-4">
+              {memos.map(m => (
+                <div key={m.id} className={`p-5 rounded-3xl border shadow-sm transition-all ${m.isRead ? 'bg-white opacity-60 border-gray-100' : 'bg-yellow-50 border-yellow-200'}`}>
+                  <p className="text-sm text-gray-800 mb-3 whitespace-pre-wrap leading-relaxed">{m.text}</p>
+                  
+                  <div className="flex justify-between items-end pt-2 border-t border-black/5">
+                    <span className="text-[10px] text-gray-400 font-mono">
+                      {new Date(m.createdAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    
+                    <div className="flex gap-3 items-center">
+                      {!m.isRead ? (
+                        <button 
+                          onClick={() => handleMarkMemoAsRead(m.id)} 
+                          className="bg-orange-500 hover:bg-orange-600 text-white text-[10px] px-3 py-1.5 rounded-full font-bold shadow-sm transition-colors"
+                        >
+                          確認OK
+                        </button>
+                      ) : (
+                        <span className="text-[10px] text-green-600 font-bold flex items-center gap-1 bg-green-50 px-2 py-1 rounded-full">
+                          <Check className="w-3 h-3"/> 既読
+                        </span>
+                      )}
+                      
                       <button 
-                        onClick={() => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'shared_memos', m.id), { isRead: true })}
-                        className="bg-orange-500 text-white text-[10px] px-4 py-2 rounded-full font-bold shadow-md"
+                        onClick={() => setDeleteTarget({ id: m.id, collection: 'shared_memos' })}
+                        className="text-gray-300 hover:text-red-400 p-1"
                       >
-                        確認したよ
+                        <Trash2 className="w-4 h-4" />
                       </button>
-                    ) : (
-                      <span className="text-[10px] text-green-600 font-bold bg-green-50 px-3 py-1.5 rounded-full flex items-center gap-1">
-                        <Check className="w-3 h-3" />既読
-                      </span>
-                    )}
-                    <button onClick={() => setDeleteTarget({ id: m.id, collection: 'shared_memos' })} className="p-2 text-gray-300">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              ))}
+               {memos.length === 0 && (
+                <div className="text-center py-10 text-gray-400 text-sm">
+                  <MessageSquare className="w-10 h-10 mx-auto mb-2 opacity-20" />
+                  メッセージはありません
+                </div>
+              )}
+            </div>
           </div>
         )}
       </main>
 
-      {/* Custom Delete Modal */}
+      {/* === DELETE CONFIRMATION MODAL === */}
       {deleteTarget && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-6 w-full max-w-xs shadow-xl text-center">
-            <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-4" />
-            <h2 className="text-lg font-bold mb-2">削除しますか？</h2>
-            <p className="text-sm text-gray-500 mb-6">この操作は取り消せません。</p>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-xs shadow-2xl text-center transform transition-all scale-100">
+            <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4">
+              <AlertTriangle className="w-8 h-8 text-red-500" />
+            </div>
+            <h2 className="text-lg font-bold mb-2 text-gray-800">削除しますか？</h2>
+            <p className="text-xs text-gray-500 mb-6">この操作は取り消せません。</p>
+            
             <div className="flex gap-3">
-              <button onClick={() => setDeleteTarget(null)} className="flex-1 py-3 bg-gray-100 rounded-xl font-bold text-gray-600">戻る</button>
-              <button onClick={executeDelete} className="flex-1 py-3 bg-red-500 rounded-xl font-bold text-white">削除</button>
+              <button 
+                onClick={() => setDeleteTarget(null)} 
+                className="flex-1 py-3 bg-gray-100 hover:bg-gray-200 rounded-2xl font-bold text-gray-600 text-sm transition-colors"
+              >
+                キャンセル
+              </button>
+              <button 
+                onClick={executeDelete} 
+                className="flex-1 py-3 bg-red-500 hover:bg-red-600 rounded-2xl font-bold text-white text-sm shadow-md transition-colors"
+              >
+                削除する
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Bottom Nav */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-md border-t flex pb-safe z-30">
-        <NavBtn active={activeTab === 'stock'} label="ストック" icon={<PackageSearch />} onClick={() => setActiveTab('stock')} />
-        <NavBtn active={activeTab === 'schedule'} label="予定" icon={<CalendarDays />} onClick={() => setActiveTab('schedule')} />
-        <NavBtn active={activeTab === 'memo'} label="メモ" icon={<MessageSquare />} onClick={() => setActiveTab('memo')} count={unreadCount} />
+      {/* === BOTTOM NAVIGATION === */}
+      <nav className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-md border-t border-gray-100 flex pb-safe z-30 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] max-w-md mx-auto">
+        <NavBtn 
+          active={activeTab === 'stock'} 
+          label="ストック" 
+          Icon={PackageSearch} 
+          onClick={() => setActiveTab('stock')} 
+        />
+        <NavBtn 
+          active={activeTab === 'schedule'} 
+          label="予定" 
+          Icon={Calendar} 
+          onClick={() => setActiveTab('schedule')} 
+        />
+        <NavBtn 
+          active={activeTab === 'memo'} 
+          label="メモ" 
+          Icon={MessageSquare} 
+          onClick={() => setActiveTab('memo')} 
+          count={unreadCount} 
+        />
       </nav>
     </div>
   );
 }
 
-function NavBtn({ active, label, icon, onClick, count }) {
+// Navigation Button Component
+function NavBtn({ active, label, Icon, onClick, count }) {
   return (
     <button 
       onClick={onClick} 
-      className={`flex-1 py-4 flex flex-col items-center gap-1 transition-all ${active ? 'text-orange-500 scale-105 font-bold' : 'text-gray-400 opacity-60'}`}
+      className={`flex-1 py-3 pt-4 flex flex-col items-center gap-1 relative transition-colors ${active ? 'text-orange-500' : 'text-gray-400 hover:text-gray-600'}`}
     >
-      {React.cloneElement(icon, { className: "w-6 h-6" })}
-      <span className="text-[10px]">{label}</span>
-      {count > 0 && (
-        <span className="absolute top-2 right-1/4 bg-red-500 text-white text-[9px] w-4 h-4 flex items-center justify-center rounded-full border-2 border-white font-bold shadow-sm">
-          {count}
-        </span>
-      )}
+      <div className={`relative p-1 rounded-xl transition-all ${active ? 'bg-orange-50' : ''}`}>
+        <Icon className={`w-6 h-6 ${active ? 'stroke-[2.5px]' : 'stroke-2'}`} />
+        {count > 0 && (
+          <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] min-w-[18px] h-[18px] flex items-center justify-center rounded-full border-2 border-white font-bold shadow-sm">
+            {count > 9 ? '9+' : count}
+          </span>
+        )}
+      </div>
+      <span className={`text-[10px] font-bold ${active ? 'opacity-100' : 'opacity-70'}`}>{label}</span>
     </button>
   );
 }
